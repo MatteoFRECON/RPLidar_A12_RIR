@@ -1,3 +1,18 @@
+/*
+  rplidar_lib.cpp
+  -----------------------------------------------------------------------------
+  Implémentation des échanges bas niveau avec le RPLIDAR.
+
+  Le fichier regroupe :
+  - l'envoi des commandes du protocole Slamtec ;
+  - la lecture des descripteurs de réponse ;
+  - la lecture des payloads série ;
+  - le décodage des mesures standard de 5 octets en angle, distance et qualité.
+
+  Les ajouts sont uniquement des commentaires destinés à rendre le dépôt GitHub
+  compréhensible par une personne extérieure au projet.
+*/
+
 #include "esp32-hal.h"
 
 #include "Arduino.h"
@@ -6,6 +21,8 @@
 
 
 
+// Constructeur : mémorise le port série du LIDAR et la broche de commande moteur.
+
 rplidar_lib::rplidar_lib(Stream &serial, int motor_pin)
 
   : serial_(serial) {  // Initialisation du membre 'serial_' avec le flux série passé en argument
@@ -13,6 +30,8 @@ rplidar_lib::rplidar_lib(Stream &serial, int motor_pin)
 }
 
 
+
+// Initialise la partie matérielle du LIDAR puis le remet dans un état connu avec reset().
 
 void rplidar_lib::init() {
 
@@ -26,11 +45,19 @@ void rplidar_lib::init() {
 
 
 
+// Applique une commande PWM au moteur du LIDAR.
+
 void rplidar_lib::motor(int power) {
     analogWrite(Mpin, power);  // Applique une valeur de puissance (entre 0 et 255) à la broche Mpin pour contrôler la vitesse du moteur
 }
 
 
+
+// Décode une trame de mesure standard RPLIDAR.
+// Format simplifié de la trame :
+// - hit[0] : flags + qualité de retour ;
+// - hit[1] et hit[2] : angle en format fixe ;
+// - hit[3] et hit[4] : distance en format fixe.
 
 int rplidar_lib::process_scan(const byte hit[5], int& new_scan, int& quality, float& angle, float& distance){
 
@@ -59,6 +86,8 @@ int rplidar_lib::process_scan(const byte hit[5], int& new_scan, int& quality, fl
 
 
 
+// Lit le descripteur de 7 octets envoyé par le LIDAR avant certaines réponses.
+
 void rplidar_lib::read_descriptor(int& dsize, int& is_single, int& dtype) {
 
   Serial.printf("available %d \n", serial_.available());  // Affiche le nombre d'octets dispo sur le port série
@@ -85,6 +114,8 @@ void rplidar_lib::read_descriptor(int& dsize, int& is_single, int& dtype) {
 
 
 
+// Lit dsize octets depuis le port série dans un buffer fourni par l'appelant.
+
 size_t rplidar_lib::read_response(byte* payload, size_t dsize) {
   // Lit dsize octets depuis le port série dans un tableau fourni par l'appelant.
   // Cette version évite les allocations dynamiques répétées.
@@ -101,6 +132,8 @@ size_t rplidar_lib::read_response(byte* payload, size_t dsize) {
 }
 
 
+
+// Interroge l'état de santé du capteur avant de lancer le scan.
 
 bool rplidar_lib::getheal() {
   // Envoie la commande pour obtenir l'état de santé du LIDAR (commande standard : 0xA5 0x52)
@@ -143,6 +176,8 @@ bool rplidar_lib::getheal() {
 
 
 
+// Lance le scan standard : après cette commande, le LIDAR envoie des mesures en continu.
+
 void rplidar_lib::start_scan() {
   
   int status = getheal();  // Vérifie l'état de santé du LIDAR
@@ -162,6 +197,8 @@ void rplidar_lib::start_scan() {
 
 
 
+// Commande optionnelle de diagnostic : demande du taux d'échantillonnage.
+
 void rplidar_lib::getsamplerate() {
 // get sample rate cf. doc rplidar
 
@@ -170,6 +207,8 @@ void rplidar_lib::getsamplerate() {
 }
 
 
+
+// Commande optionnelle de diagnostic : demande de configuration.
 
 void rplidar_lib::getconf() {
   // get confing rate cf. doc rplidar
@@ -185,6 +224,8 @@ void rplidar_lib::getconf() {
 
 
 
+// Commande optionnelle de diagnostic : informations générales du capteur.
+
 void rplidar_lib::getinfo() {
 // get info cf. doc rplidar
 
@@ -193,6 +234,8 @@ void rplidar_lib::getinfo() {
 }
 
 
+
+// Stoppe le flux de scan continu.
 
 void rplidar_lib::stop() {
 // stop le scan cf. doc rplidar
@@ -203,6 +246,8 @@ void rplidar_lib::stop() {
 
 
 
+// Envoie un reset logiciel au capteur.
+
 void rplidar_lib::reset() {
 // reset cf. doc rplidar
 
@@ -211,6 +256,8 @@ void rplidar_lib::reset() {
 }
 
 
+
+// Vide les octets encore présents dans le buffer série du LIDAR.
 
 void rplidar_lib::flush() {
   
