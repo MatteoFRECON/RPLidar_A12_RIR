@@ -1,14 +1,41 @@
-// doc rplidar https://bucket-download.slamtec.com/6fad02c42af6da33f89fbc043c5f165e2b222e0d/rplidar_interface_protocol_en.pdf
+/*
+  RPLidar_A12_RIR.ino
+  -----------------------------------------------------------------------------
+  Programme principal ESP32 pour un RPLIDAR A12.
+
+  Rôle du programme :
+  - lire les mesures envoyées en continu par le RPLIDAR ;
+  - recevoir la position du robot depuis un ESP32 principal ;
+  - filtrer les points selon la distance, l'angle et la zone du terrain ;
+  - envoyer régulièrement un booléen de détection : 0 = pas d'obstacle, 1 = obstacle.
+
+  Architecture ESP32 :
+  - Serial  : debug PC via USB ;
+  - Serial1 : liaison avec l'ESP32 principal ;
+  - Serial2 : liaison avec le RPLIDAR ;
+  - core 1  : tâche de lecture rapide du LIDAR ;
+  - core 0  : tâche de traitement, communication et envoi du résultat.
+*/
+
+
+// Bibliothèques du projet.
+// Wire.h est conservée même si l'I2C n'est pas utilisé directement dans ce fichier.
 
 #include <Wire.h>
 #include "esp_task_wdt.h"
 #include "rplidar_lib.h"
 
 // Définition des pins UART2 utilisées pour communiquer avec le LIDAR
+// Broches de communication avec le RPLIDAR.
+// RX ESP32 <- TX LIDAR et TX ESP32 -> RX LIDAR.
+
 #define RX 16 // etant le pin TX du lidar
 #define TX 17 // étant le pin RX du lidar
 
 // Définition des pins UART1 utilisées pour communiquer avec l'ESP32 principal
+// Broches de communication avec l'ESP32 principal.
+// Les deux cartes échangent des messages texte simples via UART1.
+
 #define COM_RX 25 // etant le pin TX 17 de l'esp32 principale
 #define COM_TX 26 // étant le pin RX 16 de l'esp32 principale
 
@@ -23,6 +50,9 @@
 // Core 0 : communication Serial1 + traitement/envoi vers l'ESP32 principal
 // Attention : le WiFi/Bluetooth utilise souvent le core 0.
 // Donc la tâche du core 0 contient toujours un vTaskDelay().
+// Séparation volontaire des tâches sur les deux cœurs ESP32.
+// La lecture du LIDAR est prioritaire car les mesures arrivent très vite.
+
 #define CORE_LIDAR 1
 #define CORE_COMMUNICATION 0
 
@@ -31,9 +61,14 @@
 #define DESACTIVER_WATCHDOG true
 
 // Période d'envoi vers l'ESP32 principal
+// Intervalle d'envoi de l'état de détection vers l'ESP32 principal.
+
 #define ENVOI_BOOL_MS 200
 
 // Queue de points LIDAR : évite d'écraser les mesures quand elles arrivent vite
+// Queue FreeRTOS utilisée comme tampon entre la lecture LIDAR et le traitement.
+// Elle évite de perdre trop de points quand le traitement prend du retard.
+
 #define LIDAR_QUEUE_LEN 1024
 
 // Nombre max de points que printTask traite à chaque passage.
@@ -41,12 +76,18 @@
 #define MAX_POINTS_PAR_CYCLE 120
 
 // Filtre de distance utile
+// Filtre de distance utile pour ignorer les valeurs aberrantes ou hors zone.
+
 #define DISTANCE_MIN_MM 5
 #define DISTANCE_MAX_MM 500
 
 // Zones de détection d'obstacle :
 // - Sur 360° : détection si distance <= 30 mm
 // - Sur le secteur ±60° centré sur 0° (120° au total) : détection si distance <= 50 mm
+// Deux zones de détection sont utilisées :
+// - une zone courte tout autour du robot ;
+// - une zone plus longue dans le secteur frontal.
+
 #define DETECTION_DISTANCE_360_MM   350.0f
 #define DETECTION_DISTANCE_FRONT_MM 500.0f
 #define DETECTION_ANGLE_FRONT_DEG   60.0f   // demi-angle du secteur frontal (±60° => 120° total)
@@ -55,6 +96,8 @@
 // - passe a 1 seulement a partir de 5 points valides sur l intervalle
 // - repasse a 0 seulement si 0 point valide sur l intervalle
 // - entre 1 et 4 points, on garde l ancien etat pour eviter les oscillations
+// Hystérésis de détection : plusieurs points valides sont nécessaires pour confirmer un obstacle.
+
 #define MIN_POINTS_PASSAGE_A_1 5
 
 // Buffer utilisé pour stocker les caractères reçus depuis Serial1
@@ -69,9 +112,13 @@ const unsigned long TIMEOUT_MESSAGE = 100; // ms
 // Création de l'objet lidar
 // Il utilise Serial2 pour communiquer avec le RPLIDAR
 // Le pin 18 semble être utilisé pour contrôler le moteur du LIDAR
+// Objet de communication avec le LIDAR : Serial2 pour les données, pin 18 pour le moteur.
+
 rplidar_lib lidar(Serial2, 18);
 
 // Structure d'un point LIDAR brut
+// Structure transmise dans la queue entre la tâche de lecture et la tâche de traitement.
+
 struct LidarPoint {
   float angle;
   float distance;
@@ -81,12 +128,18 @@ struct LidarPoint {
 
 // Queue FreeRTOS entre la tâche de lecture LIDAR et la tâche de traitement.
 // Cela permet de conserver beaucoup plus de points au lieu d'écraser la dernière mesure.
+// Queue FreeRTOS : lidarTask produit les points, printTask les consomme.
+
 QueueHandle_t lidarQueue = NULL;
 
 // Mutex utilisé pour protéger l'accès à la position robot reçue par Serial1
+// Mutex de protection de la position robot partagée entre plusieurs tâches.
+
 SemaphoreHandle_t dataMutex;
 
 // Décalage angulaire du LIDAR par rapport au robot
+// Offset angulaire si le LIDAR n'est pas aligné avec l'avant du robot.
+
 float angle_lidar = 0;
 
 // Variable globale pour stocker un angle calculé ou utilisé plus tard
@@ -95,6 +148,8 @@ float angle;
 bool test = true;
 
 // Position du robot reçue depuis l'ESP32 principal
+// Position robot courante reçue avec un message du type pos_rob(x;y;theta).
+
 float rob_x = 300;
 float rob_y = 300;
 float rob_theta = 0;
@@ -116,6 +171,8 @@ void lire();
 void afficherMessageRecu();
 void lidarTask(void* pvParameters);
 void printTask(void* pvParameters);
+
+// setup() initialise les liaisons série, le LIDAR, les objets FreeRTOS et les tâches.
 
 void setup()
 {
@@ -192,6 +249,8 @@ void setup()
   Serial.printf("setup() sur core %d\n", xPortGetCoreID());
 }
 
+// Désactivation partielle du watchdog pendant la phase de développement/test.
+
 void desactiverWatchdogs()
 {
 #if DESACTIVER_WATCHDOG
@@ -208,6 +267,8 @@ void desactiverWatchdogs()
   Serial.println("Watchdog loop desactive. Core WDT non force pour eviter abort().");
 #endif
 }
+
+// Gère les échanges UART : PC -> ESP32 principal et ESP32 principal -> ce programme.
 
 void lire()
 {
@@ -243,6 +304,8 @@ void lire()
     afficherMessageRecu();
   }
 }
+
+// Décode les messages texte reçus depuis l'ESP32 principal.
 
 void afficherMessageRecu()
 {
@@ -287,12 +350,17 @@ void afficherMessageRecu()
   }
 }
 
+// loop() ne pilote pas le projet : le travail est réparti dans les tâches FreeRTOS.
+
 void loop()
 {
   // Le loop Arduino ne fait plus le travail principal.
   // Les deux vraies tâches sont lidarTask et printTask, chacune épinglée à un cœur.
   vTaskDelay(1000 / portTICK_PERIOD_MS);
 }
+
+// Tâche de lecture rapide du LIDAR.
+// Elle convertit les trames brutes en LidarPoint puis les place dans la queue.
 
 void lidarTask(void* pvParameters)
 {
@@ -355,6 +423,9 @@ void lidarTask(void* pvParameters)
   }
 }
 
+// Tâche de traitement.
+// Elle lit les points disponibles, applique les filtres et envoie l'état de détection.
+
 void printTask(void* pvParameters)
 {
   (void)pvParameters;
@@ -407,6 +478,8 @@ void printTask(void* pvParameters)
       // Filtre sur la distance pour ignorer les valeurs trop proches ou trop loin
       if (p.distance <= DISTANCE_MAX_MM && p.distance >= DISTANCE_MIN_MM) {
 
+        // Passage de l'angle mesuré au repère robot/terrain.
+
         float angle_deg = p.angle + angle_lidar - local_rob_theta;
 
         // Conversion en radians pour utiliser cos() et sin()
@@ -415,6 +488,8 @@ void printTask(void* pvParameters)
         // Calcul de la position de l'obstacle dans le repère global
         float obs_x = (p.distance * cosf(angle_rad)) + local_rob_x;
         float obs_y = (-p.distance * sinf(angle_rad)) + local_rob_y;
+
+        // Filtre terrain : on ignore les points calculés hors de la zone utile.
 
         if (obs_x >= 0 && obs_x <= 3000 && obs_y >= 0 && obs_y <= 2000){
 
@@ -446,6 +521,8 @@ void printTask(void* pvParameters)
 
     // Toutes les 100 ms, on envoie l'état de détection,
     // même si aucune nouvelle mesure LIDAR n'a été consommée à cet instant.
+    // Décision périodique : on envoie un état même si peu de points ont été reçus.
+
     if (millis() - dernier_envoi_bool >= ENVOI_BOOL_MS) {
       dernier_envoi_bool = millis();
 
@@ -461,6 +538,8 @@ void printTask(void* pvParameters)
       }
 
       // Garde ce format si l ESP32 principal attend seulement 0/1
+      // Format volontairement simple côté ESP32 principal : une ligne contenant 0 ou 1.
+
       Serial1.println(detection_fiable ? 1 : 0);
 
       // Debug cote PC : nombre de points reellement traites pendant l intervalle
