@@ -491,11 +491,12 @@ Si `queue_restante` reste élevé, il faut réduire le nombre d'affichages séri
 
 ---
 
+
 ## Références utiles
 
-- Documentation protocole SLAMTEC RPLIDAR : `LR001_SLAMTEC_rplidar_protocol_v2.1_en.pdf`
-- Datasheet RPLIDAR A2M12 : `pj2-ld310-slamtec-rplidar-datasheet-a2m12-v1-0-en-2874 (1).pdf`
-- SDK officiel SLAMTEC : <https://github.com/Slamtec/rplidar_sdk>
+- [Documentation protocole SLAMTEC RPLIDAR](./RPLIDAR_A12_PROTOCOLE.pdf)
+- [Datasheet RPLIDAR A2M12](./RPLIDAR_A12_DATASHEET.pdf)
+- [SDK officiel SLAMTEC](https://github.com/Slamtec/rplidar_sdk)
 
 ---
 
